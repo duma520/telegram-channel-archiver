@@ -1,0 +1,45 @@
+Telegram 频道批量归档器 —— 三步安装
+====================================
+
+【第一步】装 Python 与依赖
+  1) 装 Python 3.9+，安装时勾选 "Add Python to PATH"
+  2) 打开命令行，进到本目录：
+       cd /d <本目录>
+       python -m venv .venv
+       .venv\Scripts\activate
+       pip install -r requirements.txt
+     国内网络慢可加： -i https://pypi.tuna.tsinghua.edu.cn/simple
+     若提示缺 python_socks，再单独跑：
+       pip install "python-socks[asyncio]" -i https://pypi.org/simple
+
+【第二步】填配置（两分钟）
+  1) 打开 https://my.telegram.org ，手机号登录，API development tools 建应用
+  2) 复制 .env.example 为 .env，把 api_id / api_hash 填进去
+  3) 需要代理就填 TG_PROXY，例如 socks5://127.0.0.1:1080；直连留空
+     注意：.env 是凭据文件，不要发给别人、不要提交到仓库
+
+【第三步】登录并开下
+  窗口 A（登录页）：
+       python qr_server.py
+  窗口 B（登录本体）：
+       python login.py
+  浏览器打开 http://127.0.0.1:47050/ ，手机 Telegram 扫码
+  （二维码每 18 秒自动换新，随时扫都有效；也能用右侧手机号登录）
+
+  登录成功后建任务并下载：
+       python tgarchiver.py probe <频道名>
+       python tgarchiver.py new --name demo --channel <频道名> --out "D:\Downloads\demo" --selector all
+       python tgarchiver.py index demo
+       python tgarchiver.py run demo
+
+  另开窗口看速度：
+       python monitor.py     ->  http://127.0.0.1:47060/
+
+【常见问题】
+  * 一直连不上：先 probe，确认 TG_PROXY 端口对、代理软件在跑
+  * 报 database is locked：同一 session 被两个进程用了，只留一个 run
+  * 速度一直红：换代理节点，别加 workers
+  * 更多排错见 README.md 第 10 节
+
+【停止】
+  下载器 Ctrl+C 即可停；重跑同一条 run 命令会从断点继续。
