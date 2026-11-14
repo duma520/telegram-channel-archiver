@@ -23,7 +23,8 @@
 - [13. 已知限制与合规说明](#13-已知限制与合规说明)
 - [14. 目录结构与自测](#14-目录结构--开发与测试)
 - [15. 版本更新简介](#15-版本更新简介)
-- [16. 许可](#16-许可与致谢)
+- [16. 作为 Agent Skill 使用](#16-作为-agent-skill-使用)
+- [17. 许可](#17-许可与致谢)
 
 ---
 
@@ -541,6 +542,7 @@ python tgarchiver.py run t --limit 1   :: 看到 part 增长、看板有速度�
 
 | 版本 | 日期 | 一句话变更 |
 | --- | --- | --- |
+| v1.2.0 | 2026-11-14 | 新增 Agent Skill 形态（skill/tgarchiver：五步流程 + 环境自检） |
 | v1.1.0 | 2026-11-14 | 新增代理池：频道/机器人/手贴链接采集、测活、去重留档、一键切线路、吞吐探针 |
 | v1.0.0 | 2026-11-14 | 首个公开版：索引/筛选/分片续传/永续重连/自适应单位看板/扫码登录 |
 
@@ -548,7 +550,36 @@ python tgarchiver.py run t --limit 1   :: 看到 part 增长、看板有速度�
 
 ---
 
-## 16. 许可与致谢
+## 16. 作为 Agent Skill 使用
+
+仓库里 `skill/tgarchiver/` 是一个可直接装进 DSH / Claude Code 一类 Agent 的技能包：
+
+```
+skill/tgarchiver/
+├─ SKILL.md              # 触发条件 + 五步流程 + 常见失败 + 红线
+└─ scripts/check_env.py  # 环境自检（python / telethon / state / 会话 / .env），输出 JSON
+```
+
+安装（DSH 全局技能目录）：
+
+~~~bat
+xcopy /E /I skill\tgarchiver "%USERPROFILE%\.dsh\skills\tgarchiver"
+~~~
+
+装好后对 Agent 说「把这个 TG 频道的视频下到 D 盘某目录」就会命中这个技能，流程固定为：
+
+1. `check_env.py` 自检（缺 telethon / 没登录会直接告诉你先做哪一步）
+2. `tgarchiver.py new` 建任务
+3. `tgarchiver.py index` 先看命中数（为 0 不下载）
+4. `tgarchiver.py run` 后台长跑，读 `state/<任务>_speed.json` 看速度
+5. 速度为 0 就 `tgproxy harvest/test/speedprobe/apply` 换线，再回到第 4 步
+
+环境变量 `TGARCHIVER_HOME` 可以指定工具目录，不设时自动找 `G:\Python_Code\telegram-channel-archiver`。
+
+---
+
+
+## 17. 许可与致谢
 
 - 许可：MIT（见 [LICENSE](LICENSE)）。
 - 依赖：[Telethon](https://github.com/LonamiWebs/Telethon)、[python-socks](https://github.com/romis2012/python-socks)、[qrcode](https://github.com/lincolnloop/python-qrcode)。
