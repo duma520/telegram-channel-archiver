@@ -35,6 +35,16 @@ Telegram 频道批量归档器 —— 三步安装
   另开窗口看速度：
        python monitor.py     ->  http://127.0.0.1:47060/
 
+【可选】自动找代理（没节点时用）
+   1) 采集：python tgproxy.py harvest --limit 120
+      （默认读 4 个公开频道；也能 python tgproxy.py add "<你复制的 t.me/proxy 链接>"）
+   2) 测活：python tgproxy.py test --limit 200
+   3) 量速：python speedprobe.py --top 3 --bytes 3
+   4) 选中一条写进 state/proxy.json：python tgproxy.py apply
+      下载器下一轮重连就会用上，不用改 .env、不用重启
+   细节见 README.md 第 5 节。注意 ee 前缀（fake-TLS）与 webproxy 这类 Telethon 连不上，
+   工具会标成「客户端专用」，要验证只能在官方 Telegram 客户端里试。
+
 【常见问题】
   * 一直连不上：先 probe，确认 TG_PROXY 端口对、代理软件在跑
   * 报 database is locked：同一 session 被两个进程用了，只留一个 run

@@ -70,8 +70,39 @@ def require_credentials():
             "3) 复制 .env.example 为 .env，填进去（.env 不会被提交）")
 
 
+def _proxy_from_state():
+    """tgproxy.py apply 写的 state/proxy.json 优先（换线路不必改 .env）。"""
+    import json
+    p = os.path.join(STATE_DIR, "proxy.json")
+    try:
+        with open(p, encoding="utf-8") as f:
+            c = json.load(f)
+    except (OSError, ValueError):
+        return None
+    host = (c.get("host") or "").strip()
+    try:
+        port = int(c.get("port") or 0)
+    except (TypeError, ValueError):
+        return None
+    if not host or not (0 < port < 65536):
+        return None
+    typ = (c.get("type") or "socks5").lower()
+    if typ in ("mtproxy", "mtproto"):
+        return ("mtproxy", host, port, c.get("secret") or "")
+    if typ == "http":
+        if c.get("user"):
+            return ("http", host, port, True, c["user"], c.get("pass") or "")
+        return ("http", host, port)
+    if c.get("user"):
+        return ("socks5", host, port, True, c["user"], c.get("pass") or "")
+    return ("socks5", host, port)
+
+
 def proxy_tuple():
-    """把 TG_PROXY 解析成 Telethon 的 proxy 参数；留空返回 None（直连）。"""
+    """Telethon 的 proxy 参数：state/proxy.json > .env 的 TG_PROXY > 直连(None)。"""
+    from_state = _proxy_from_state()
+    if from_state is not None:
+        return from_state
     url = PROXY_URL
     if not url:
         return None
@@ -90,8 +121,16 @@ def proxy_tuple():
     port = p.port or (1080 if scheme == "socks5" else 8080)
     if p.username:
         return (scheme, host, port, True, up.unquote(p.username), up.unquote(p.password or ""))
-    return (scheme, host, port, True)
+    return (scheme, host, port)  # 无账号密码用 3 元组，Telethon 不接受 4 元组
 
 
 def proxy_label():
+    import json
+    try:
+        with open(os.path.join(STATE_DIR, "proxy.json"), encoding="utf-8") as f:
+            c = json.load(f)
+        if c.get("host"):
+            return "%s %s:%s" % ((c.get("type") or "socks5"), c.get("host"), c.get("port"))
+    except (OSError, ValueError):
+        pass
     return PROXY_URL or "直连"

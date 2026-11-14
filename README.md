@@ -12,17 +12,18 @@
 - [2. 零基础：从没装过 Python 也能跑起来](#2-零基础从没装过-python-也能跑起来)
 - [3. 三个真实使用场景](#3-三个真实使用场景)
 - [4. 命令逐项说明](#4-命令逐项说明)
-- [5. 任务文件字段详解](#5-任务文件job-json字段详解)
-- [6. 环境变量与 .env](#6-环境变量与-env)
-- [7. 命名规则与重名策略](#7-命名规则与重名策略)
-- [8. 实时看板](#8-实时看板)
-- [9. 工作原理（技术参考）](#9-工作原理技术参考)
-- [10. 排错手册](#10-排错手册)
-- [11. FAQ](#11-faq)
-- [12. 已知限制与合规说明](#12-已知限制与合规说明)
-- [13. 目录结构与自测](#13-目录结构--开发与测试)
-- [14. 版本更新简介](#14-版本更新简介)
-- [15. 许可](#15-许可与致谢)
+- [5. 代理池（tgproxy）](#5-代理池tgproxy)
+- [6. 任务文件字段详解](#6-任务文件job-json字段详解)
+- [7. 环境变量与 .env](#7-环境变量与-env)
+- [8. 命名规则与重名策略](#8-命名规则与重名策略)
+- [9. 实时看板](#9-实时看板)
+- [10. 工作原理（技术参考）](#10-工作原理技术参考)
+- [11. 排错手册](#11-排错手册)
+- [12. FAQ](#12-faq)
+- [13. 已知限制与合规说明](#13-已知限制与合规说明)
+- [14. 目录结构与自测](#14-目录结构--开发与测试)
+- [15. 版本更新简介](#15-版本更新简介)
+- [16. 许可](#16-许可与致谢)
 
 ---
 
@@ -191,6 +192,8 @@ python tgarchiver.py run lessons
 | `login.py` | 登录（配合 `qr_server.py`） | — |
 | `qr_server.py` | 登录页 http 服务 | 端口 `TG_PORT_LOGIN` |
 | `monitor.py` | 速度看板 | 端口 `TG_PORT_MONITOR` |
+| `tgproxy.py` | 代理池：采集 / 测活 / 去重 / 选中线路 | 见 [5. 代理池](#5-代理池tgproxy) |
+| `speedprobe.py` | 量某条线路的真实吞吐（MB/s） | `--key` / `--top` / `--bytes` |
 
 `new` 的参数：
 
@@ -209,7 +212,89 @@ python tgarchiver.py run lessons
 
 ---
 
-## 5. 任务文件（job JSON）字段详解
+## 5. 代理池（tgproxy）
+
+> 一句话：不用再手工找节点。把频道、机器人、别人发来的代理链接收进一个去重池子，测通就用，不通的留档，下次能一眼看出「这条上次是不是已经试过」。
+
+### 5.1 四条收集来源
+
+| 来源 | 怎么给 | 说明 |
+| --- | --- | --- |
+| 频道 | `state/mtproxy/channels.txt`（一行一个）或 `--channels a,b` | 频道要你账号能进；关闭公开预览也能读（走 MTProto，不是抓网页） |
+| 机器人 | `--bot mtpro_xyz_bot --command /mtproto` | 把回复里带链接的消息抽出来；命令名可换 |
+| 你手贴的链接 | `tgproxy.py add "<链接>"` | 支持 `t.me/proxy?`、`t.me/socks?`、`t.me/webproxy?`、`tg://proxy?`、`socks5://`、`http://` |
+| 已有池子 | 自动 | 二次采集只读新消息（游标 `meta.last_id:<频道>`），**不会重复抓老消息** |
+
+### 5.2 命令逐项
+
+~~~bat
+:: 采集（默认不碰机器人；每频道最多 120 条）
+python tgproxy.py harvest --limit 120
+
+:: 采集 + 问机器人一次
+python tgproxy.py harvest --bot mtpro_xyz_bot --command /mtproto
+
+:: 手贴链接（可一次给多条）
+python tgproxy.py add "https://t.me/proxy?server=1.2.3.4&port=443&secret=dd00112233..."
+python tgproxy.py add "https://t.me/socks?server=9.9.9.9&port=1080&user=u&pass=p"
+
+:: 测活：TCP 预检 + 用未登录会话真连一次 help.getConfig
+python tgproxy.py test --limit 200 --conc 8
+
+:: 看池子
+python tgproxy.py stats
+python tgproxy.py list --status alive --limit 20
+
+:: 量真实吞吐（真下 3~4MB 片段，单位 MB/s；默认测 RTT 前 3 条可用条目）
+python speedprobe.py --top 3 --bytes 3
+
+:: 把最优一条写成 state/proxy.json —— 下载器下一轮重连自动用上
+python tgproxy.py apply
+
+:: 把历史解析错的 secret 重解一遍（ee+SNI 那批）
+python tgproxy.py recheck
+~~~
+
+### 5.3 状态口径（`list` 里的中文列）
+
+| status | 中文 | 含义 |
+| --- | --- | --- |
+| `new` | 未测 | 刚收进来还没测 |
+| `alive` | 可用 | TCP 通 + MTProto 真连通（或 SOCKS 握手成功） |
+| `dead` | 不通 | TCP 不通 / 握手失败 / secret 错 |
+| `unsupported` | 客户端专用 | `ee` 前缀（fake-TLS）或 webproxy：**Telethon 用不了**，只能在官方客户端里试 |
+| `invalid` | 串不合法 | 端口越界、secret 长度或字符不对 |
+
+每条还记 `fail_count`（连续失败次数）、`last_check` / `rtt_ms`（测活）、`speed_bps`（测速）、`seen_count`（被重复看到几次）、`source`（哪个频道/机器人/手贴）。**`seen_count` 高说明那个频道在反复刷同一条**，池子里不会重复存。
+
+### 5.4 为什么不通也要留着
+
+「避免多次获取相同的连接」是硬要求：池子把每条都存下来并带上状态与时间，所以
+
+- 下次采集遇到同一条 → 只更新 `last_seen` / `seen_count`，不重新测；
+- 想知道「这条以前通过吗」→ `list --status dead` 一眼看到；
+- `test` 默认优先测 `new`，再考虑冷却期外的旧条目，不会把时间浪费在刚测过的不通条目上。
+
+### 5.5 能力边界（源码实证，别当成 bug）
+
+- Telethon 1.45 的 `tcpmtproxy.py` 只实现 **dd**（padded）与无前缀 16 字节 secret；**`ee`（fake-TLS）没有 TLS 层，连不上**；**webproxy（WebSocket）不支持**。这两类标 `unsupported`，要验证得在官方客户端里点。
+- 公开频道里 `ee` 占绝大多数，`dd`/plain 的存活率也很低——这是节点生态的现状，不是解析错。
+
+### 5.6 本轮实测参考（2026-11-14 22:40 前后，家用宽带 + 本地代理）
+
+| 项目 | 数字 |
+| --- | --- |
+| 4 个公开频道采集 | 2116 条链接 → 池子 360 条（去重率约 83%） |
+| 二次采集 | 0 新增（增量生效） |
+| 测活 | 可用 3 / 不通 325 / 客户端专用 23 / 不合法 7 |
+| 真实吞吐（各下 3MB） | 0.032 MB/s、0.031 MB/s、第三条 100 秒未完成 |
+
+结论：公开池里能用的几乎都是 SOCKS5，速度量级只有几十 KB/s；**想要 0.5 MB/s 以上还是得自建或付费节点**。本工具负责「找到、测通、留住、随时切换」，不负责变快。
+
+---
+
+
+## 6. 任务文件（job JSON）字段详解
 
 `state/jobs/demo.json` 可以手工改，改完直接 `run`：
 
@@ -249,7 +334,7 @@ python tgarchiver.py run lessons
 
 ---
 
-## 6. 环境变量与 .env
+## 7. 环境变量与 .env
 
 | 变量 | 必填 | 默认 | 说明 |
 | --- | --- | --- | --- |
@@ -271,7 +356,7 @@ python tgarchiver.py run demo
 
 ---
 
-## 7. 命名规则与重名策略
+## 8. 命名规则与重名策略
 
 ### 7.1 三种命名
 
@@ -299,7 +384,7 @@ python tgarchiver.py run demo
 
 ---
 
-## 8. 实时看板
+## 9. 实时看板
 
 `python monitor.py` 后打开 <http://127.0.0.1:47060/>。效果见[界面预览](#界面预览)。
 
@@ -320,7 +405,7 @@ python tgarchiver.py run demo
 
 ---
 
-## 9. 工作原理（技术参考）
+## 10. 工作原理（技术参考）
 
 ### 9.1 三段式
 
@@ -354,7 +439,7 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 
 ---
 
-## 10. 排错手册
+## 11. 排错手册
 
 | 现象 | 原因 | 解决 |
 | --- | --- | --- |
@@ -378,7 +463,7 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 
 ---
 
-## 11. FAQ
+## 12. FAQ
 
 **Q1：能不能只下最近的 N 条？** 先 `index`，再 `run --limit N`（按体积从小到大取 N 个）。
 
@@ -406,7 +491,7 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 
 ---
 
-## 12. 已知限制与合规说明
+## 13. 已知限制与合规说明
 
 - **只下载你本来就能看到的内容**。工具不做越权、破解、绕过付费墙的事，只是把你账号有权限的东西搬到自己的硬盘。
 - 请遵守 Telegram 服务条款与当地法律；归档他人作品前确认你有相应权利或授权。
@@ -417,7 +502,7 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 
 ---
 
-## 13. 目录结构 / 开发与测试
+## 14. 目录结构 / 开发与测试
 
 ~~~
 telegram-channel-archiver/
@@ -427,6 +512,12 @@ telegram-channel-archiver/
 ├─ monitor.py         # 速度看板（自适应单位 + 分级配色）
 ├─ naming.py          # 标题/年份抽取、文件名安全化
 ├─ config.py          # 环境变量/.env 解析、代理参数解析
+├─ tgproxy.py         # 代理池 CLI：harvest/add/test/list/stats/recheck/export/apply
+├─ proxyharvest.py    # 从频道与机器人抓代理链接（增量）
+├─ proxylinks.py      # 链接解析 + secret 分类（dd/ee/plain/SNI）
+├─ proxypool.py       # sqlite 池：去重 / 状态 / 测活测速记录
+├─ proxytest.py       # 两级测活（TCP 预检 + MTProto 真连）
+├─ speedprobe.py      # 真下一段量吞吐
 ├─ requirements.txt
 ├─ .env.example       # 复制成 .env 后填写
 ├─ INSTALL.txt        # 三步安装
@@ -446,17 +537,18 @@ python tgarchiver.py run t --limit 1   :: 看到 part 增长、看板有速度�
 
 ---
 
-## 14. 版本更新简介
+## 15. 版本更新简介
 
 | 版本 | 日期 | 一句话变更 |
 | --- | --- | --- |
+| v1.1.0 | 2026-11-14 | 新增代理池：频道/机器人/手贴链接采集、测活、去重留档、一键切线路、吞吐探针 |
 | v1.0.0 | 2026-11-14 | 首个公开版：索引/筛选/分片续传/永续重连/自适应单位看板/扫码登录 |
 
 > 2026-11-14 文档补充：新增「界面预览」两张截图（演示数据），代码零改动，版本号不升。
 
 ---
 
-## 15. 许可与致谢
+## 16. 许可与致谢
 
 - 许可：MIT（见 [LICENSE](LICENSE)）。
 - 依赖：[Telethon](https://github.com/LonamiWebs/Telethon)、[python-socks](https://github.com/romis2012/python-socks)、[qrcode](https://github.com/lincolnloop/python-qrcode)。
