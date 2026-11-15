@@ -8,6 +8,9 @@
   * 三种命名：caption（《标题》（年份））/ orig（原始文件名）/ msgid（频道_消息号）
   * 重名自动在扩展名前加 _YYYYMMDD_HHMMSS，并把最终名字记进进度文件，重启后不变
   * 每 5 秒写速度遥测 JSON，供 monitor.py 看板显示
+  * 加密后端自检：必须装 cryptg（C 实现的 AES-IGE）。缺了会退回 pyaes 纯 Python 实现，
+    把 asyncio 事件循环占满，实测 8 并发从 7.3 MB/s 掉到 0.065 MB/s（慢 112 倍），
+    而且加并发、换代理、换协议都无效 —— 所以开机就叫，不静默降级。
 
 用法
   python tgarchiver.py new --name demo --channel https://t.me/somechannel --out "D:\\dl"
@@ -21,7 +24,7 @@
   --keywords 词1,词2              selector=keyword 时生效
   --min-mb 5 --max-mb 200         体积过滤（0 表示不限）
   --name-mode caption|orig|msgid  默认 orig
-  --workers 4                     并发分片数
+  --workers 8                     并发分片数（实测饱和点，1~16 之间调；前提是装了 cryptg）
   --limit 20                      run 时只处理前 N 个文件（试跑用）
 """
 import argparse, asyncio, datetime, json, math, os, re, sys, time, traceback
@@ -37,6 +40,38 @@ SESSION = os.path.join(SD, "tg_session.session")
 JOBD = os.path.join(SD, "jobs")
 PROXYF = os.path.join(SD, "proxy.json")
 os.makedirs(JOBD, exist_ok=True)
+
+
+# ---------------------------------------------------------------- 加密后端自检
+# MTProto 每个数据块都要 AES-IGE 解密。装了 cryptg 走 C 实现；没有就退回 pyaes
+# 的纯 Python 实现，把 asyncio 单线程事件循环占满 —— 实测 8 并发从 7.3 MB/s
+# 掉到 0.065 MB/s（慢 112 倍），且加并发、换代理、换协议全部无效。
+def _check_crypto():
+    try:
+        from telethon.crypto import aes as _aes
+        if getattr(_aes, "cryptg", None) is not None:
+            try:
+                from importlib.metadata import version as _ver
+                _v = _ver("cryptg")
+            except Exception:
+                _v = "已启用"
+            return True, "cryptg %s" % _v
+        return False, "pyaes（纯 Python）"
+    except Exception as ex:
+        return False, "检测失败 %s" % type(ex).__name__
+
+
+CRYPTO_OK, CRYPTO_DESC = _check_crypto()
+
+if not CRYPTO_OK:
+    sys.stderr.write(
+        "\n" + "=" * 72 + "\n"
+        "【警告】加密后端是 %s，未启用 cryptg。\n"
+        "  MTProto 解密会跑纯 Python AES-IGE，下载速度将掉到 1/100 左右，\n"
+        "  而且提高并发、更换代理、更换传输协议都不会有任何改善。\n"
+        "  修复： python -m pip install cryptg -i https://pypi.org/simple\n"
+        "=" * 72 + "\n\n" % CRYPTO_DESC)
+    sys.stderr.flush()
 
 
 # ---------------------------------------------------------------- 基础工具
@@ -96,9 +131,9 @@ def load_job(name):
     j.setdefault("min_mb", 0)
     j.setdefault("max_mb", 0)
     j.setdefault("name_mode", "orig")
-    j.setdefault("workers", 4)
+    j.setdefault("workers", 8)      # 实测饱和点：8 流 × 512KB 约 6.5~7.3 MB/s
     j.setdefault("seg_mb", 2)
-    j.setdefault("chunk_kb", 128)
+    j.setdefault("chunk_kb", 512)   # 128KB 块太小，重试与计量的粒度反而不划算
     j.setdefault("ext", ".mp4")
     j.setdefault("index_file", "%s_index.json" % j["name"])
     j.setdefault("progress_file", "%s_progress.json" % j["name"])
@@ -300,7 +335,8 @@ async def meter_task(j, m):
                "files_done": m.done, "files_total": m.total,
                "current": m.cur, "fail": m.fail,
                "job": j["name"],
-               "proxy": proxy_label()})
+               "proxy": proxy_label(),
+               "crypto": CRYPTO_DESC})
         m.bytes = 0
 
 
@@ -432,8 +468,9 @@ async def cmd_run(name, limit=0):
     progst = jload(j["progress_file"], {})
     meter = Meter()
     asyncio.create_task(meter_task(j, meter))
-    log(j, "BOOT job=%s total=%d workers=%d seg=%dMB chunk=%dKB proxy=%s"
-        % (j["name"], len(items), j["workers"], j["seg_mb"], j["chunk_kb"], proxy_label()))
+    log(j, "BOOT job=%s total=%d workers=%d seg=%dMB chunk=%dKB proxy=%s crypto=%s"
+        % (j["name"], len(items), j["workers"], j["seg_mb"], j["chunk_kb"],
+           proxy_label(), CRYPTO_DESC))
     rnd = 0
     while True:
         rnd += 1
@@ -481,7 +518,7 @@ def cmd_new(args):
     j = {"name": name, "channel": norm_channel(args.channel), "out_dir": args.out,
          "selector": args.selector, "keywords": [k for k in (args.keywords or "").split(",") if k],
          "min_mb": args.min_mb, "max_mb": args.max_mb, "name_mode": args.name_mode,
-         "workers": args.workers, "seg_mb": 2, "chunk_kb": 128, "ext": args.ext}
+         "workers": args.workers, "seg_mb": 2, "chunk_kb": 512, "ext": args.ext}
     p = os.path.join(JOBD, name + ".json")
     if os.path.exists(p) and not args.force:
         raise SystemExit("任务已存在: %s （加 --force 覆盖）" % p)
@@ -516,7 +553,7 @@ async def cmd_probe(ch):
     j = {"name": "probe", "channel": norm_channel(ch), "out_dir": os.getcwd(),
          "speed_file": os.path.join(SD, "probe_speed.json"), "log_file": os.path.join(SD, "probe.log"),
          "selector": "all", "keywords": [], "min_mb": 0, "max_mb": 0, "name_mode": "orig",
-         "workers": 1, "seg_mb": 2, "chunk_kb": 128, "ext": ".mp4",
+         "workers": 1, "seg_mb": 2, "chunk_kb": 512, "ext": ".mp4",
          "progress_file": os.path.join(SD, "probe_progress.json"), "index_file": os.path.join(SD, "probe_index.json")}
     cl = await get_client(j)
     ent = await cl.get_entity(norm_channel(ch))
@@ -542,7 +579,7 @@ def main():
     n.add_argument("--min-mb", type=float, default=0)
     n.add_argument("--max-mb", type=float, default=0)
     n.add_argument("--name-mode", default="orig", choices=["caption", "orig", "msgid"])
-    n.add_argument("--workers", type=int, default=4)
+    n.add_argument("--workers", type=int, default=8)
     n.add_argument("--ext", default=".mp4")
     n.add_argument("--force", action="store_true")
 

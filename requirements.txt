@@ -1,4 +1,8 @@
 telethon>=1.36
+# cryptg 是硬依赖：没有它 MTProto 只能跑 pyaes 纯 Python AES-IGE，
+# 下载速度会掉到 1/100（实测 7.3 MB/s → 0.065 MB/s）。它在 PyPI 上，
+# 若用的国内镜像没同步到，请加 -i https://pypi.org/simple 单独装。
+cryptg>=0.4
 python-socks[asyncio]>=2.4
 qrcode>=7.4
 pillow>=10.0

@@ -25,6 +25,19 @@ def main():
     except Exception as e:  # noqa: BLE001
         out["telethon"] = None
         out["telethon_error"] = "%s: %s" % (type(e).__name__, str(e)[:80])
+    # cryptg 是硬依赖：缺了 MTProto 会跑 pyaes 纯 Python AES-IGE，速度掉到 1/100
+    try:
+        from telethon.crypto import aes as _aes
+        out["cryptg"] = bool(getattr(_aes, "cryptg", None) is not None)
+        if out["cryptg"]:
+            try:
+                from importlib.metadata import version as _ver
+                out["cryptg_version"] = _ver("cryptg")
+            except Exception:
+                out["cryptg_version"] = "unknown"
+    except Exception as e:  # noqa: BLE001
+        out["cryptg"] = None
+        out["cryptg_error"] = "%s: %s" % (type(e).__name__, str(e)[:80])
     state = os.path.join(home, "state")
     out["state_dir"] = state
     out["state_exists"] = os.path.isdir(state)
@@ -44,6 +57,9 @@ def main():
     out["jobs"] = sorted(f[:-5] for f in os.listdir(os.path.join(state, "jobs"))
                          if f.endswith(".json")) if os.path.isdir(os.path.join(state, "jobs")) else []
     out["ok"] = bool(out.get("telethon") and out["session"] and out.get("api_configured"))
+    # 能跑但没 cryptg 的，单独标出来：任务会跑得动，但只有 1/100 速度
+    if out["ok"] and not out.get("cryptg"):
+        out["warning"] = "缺 cryptg：下载速度会掉到 1/100。装：pip install cryptg -i https://pypi.org/simple"
     print(json.dumps(out, ensure_ascii=False, indent=1))
 
 

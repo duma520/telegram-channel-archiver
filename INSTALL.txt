@@ -9,6 +9,15 @@ Telegram 频道批量归档器 —— 三步安装
        .venv\Scripts\activate
        pip install -r requirements.txt
      国内网络慢可加： -i https://pypi.tuna.tsinghua.edu.cn/simple
+
+     ★ cryptg 必须装上（关键，不是可选）：
+       pip install cryptg -i https://pypi.org/simple
+       清华等国内镜像常常没有 cryptg 的 Windows 轮子，会报
+       "Could not find a version that satisfies the requirement cryptg"，
+       所以这一条一定要显式指定官方源。
+       验证：tgarchiver.py run 启动后第一行日志应有 crypto=cryptg x.y.z；
+       显示 pyaes 就是没装，速度只有 1/100。
+
      若提示缺 python_socks，再单独跑：
        pip install "python-socks[asyncio]" -i https://pypi.org/simple
 
@@ -48,7 +57,8 @@ Telegram 频道批量归档器 —— 三步安装
 【常见问题】
   * 一直连不上：先 probe，确认 TG_PROXY 端口对、代理软件在跑
   * 报 database is locked：同一 session 被两个进程用了，只留一个 run
-  * 速度一直红：换代理节点，别加 workers
+  * 速度一直红、只有几十 KB/s：先看日志里的 crypto= 是不是 cryptg。
+    是 pyaes 就是没装 cryptg（装完快 112 倍），装了 cryptg 还慢才轮到换节点
   * 更多排错见 README.md 第 10 节
 
 【停止】

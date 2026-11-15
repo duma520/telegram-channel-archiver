@@ -84,6 +84,15 @@ pip install -r requirements.txt
 ~~~
 
 国内慢就加镜像 `-i https://pypi.tuna.tsinghua.edu.cn/simple`。
+
+> **`cryptg` 必须装上，它不是可选加速。** 清华等国内镜像常常没有 cryptg 的 Windows 轮子（报 `Could not find a version that satisfies the requirement cryptg`），必须显式走官方源：
+>
+> ~~~bat
+> pip install cryptg -i https://pypi.org/simple
+> ~~~
+>
+> 没装的话下载速度只有 1/100（详见 [9.4](#94-性能与瓶颈先看这一条必须有-cryptg)）。验证方式：`run` 启动日志里 `crypto=cryptg x.y.z`。
+
 `python-socks` 部分镜像缺失，装不上单独来一次：
 `pip install "python-socks[asyncio]" -i https://pypi.org/simple`
 
@@ -207,7 +216,7 @@ python tgarchiver.py run lessons
 | `--keywords` | 空 | 逗号分隔，`selector=keyword` 时生效 |
 | `--min-mb` / `--max-mb` | `0` | 体积区间，`0` 不限 |
 | `--name-mode` | `orig` | `caption` / `orig` / `msgid` |
-| `--workers` | `4` | 同一文件的并发分片数 |
+| `--workers` | `8` | 同一文件的并发分片数（实测饱和点；前提是装了 cryptg） |
 | `--ext` | `.mp4` | 落盘扩展名 |
 | `--force` | 关 | 同名任务已存在时覆盖 |
 
@@ -309,9 +318,9 @@ python tgproxy.py recheck
   "min_mb": 0,
   "max_mb": 0,
   "name_mode": "caption",
-  "workers": 4,
+  "workers": 8,
   "seg_mb": 2,
-  "chunk_kb": 128,
+  "chunk_kb": 512,
   "ext": ".mp4"
 }
 ~~~
@@ -325,9 +334,9 @@ python tgproxy.py recheck
 | `keywords` | list | 关键词 | 同上 |
 | `min_mb` / `max_mb` | float | 体积过滤 | 同上 |
 | `name_mode` | str | 命名方式 | 立即生效；已下文件不会自动改名 |
-| `workers` | int | 并发分片数 | 1~4 稳妥；8+ 容易被断流 |
-| `seg_mb` | int | 分片大小 | 越小断点越细、请求越多；2 是均衡值 |
-| `chunk_kb` | int | 单次请求大小 | 影响测速精度与重试粒度，128 较稳 |
+| `workers` | int | 并发分片数 | 实测 8 是饱和点（1→0.31、2→2.6、8→6.5~7.3、12→6.4、16→3.9 MB/s）；**先确认装了 cryptg**，否则加并发毫无意义 |
+| `seg_mb` | int | 分片大小 | 越小断点越细、请求越多；2 是均衡值，改 1 只快 5%~15% |
+| `chunk_kb` | int | 单次请求大小 | 512 最快（8 流×512KB 达饱和）；128 只在代理频繁掐断时才更稳，但会损失吞吐 |
 | `ext` | str | 扩展名 | 只影响落盘名，不转码 |
 
 索引 `state/demo_index.json` 每条记录含 `msg_id / size / caption / title / year / name / doc_id / access_hash / file_reference`。
@@ -399,10 +408,10 @@ python tgarchiver.py run demo
 ~~~json
 {"ts":"2026-11-14 20:39:07","bps":78643,"mbps":0.075,"session_mb":5.1,
  "files_done":0,"files_total":1,"current":"《标题》.mp4","fail":0,
- "job":"demo","proxy":"socks5://127.0.0.1:1080"}
+ "job":"demo","proxy":"socks5://127.0.0.1:1080","crypto":"cryptg 0.5.2"}
 ~~~
 
-> 速度是「块级」的：Telegram 按 `request_size` 整块交付，只有整块收全才计数。块太大（如 512KB）时半途被掐断的流量一个字节都不算，看板会假 0 —— 所以默认 `chunk_kb=128`。
+> 速度是「块级」的：Telegram 按 `request_size` 整块交付，只有整块收全才计数。块被半途掐断时这段流量不算数，看板会偏低甚至假 0 —— 所以**看板速度只作相对参考**，长时间 0 但 `__parts` 在涨说明是计量问题而不是没在下。
 
 ---
 
@@ -432,11 +441,44 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 
 `get_client()` 是无限重试循环：失败就 `sleep(min(20, 2+attempt*2))` 再连。代理软件换节点（本地端口不变）→ 旧连接断、`fetch_seg` 捕获异常重试 → 新连接走新节点。改 `.env` 里的端口则需重启 `run`。
 
-### 9.4 性能与瓶颈
+### 9.4 性能与瓶颈（先看这一条：必须有 cryptg）
 
-- 单连接吞吐主要受**代理出口**与 Telegram 单连接限速约束，本机带宽通常不是瓶颈。
-- 同一文件加并发收益递减：1→4 有小幅提升，8+ 容易 `AuthBytesInvalidError`（同 auth key 连接被服务端注销）。
-- 多文件各开连接也不简单相加，总量仍受出口约束 —— **换更快节点永远比调参有效**。
+**90% 的「下载慢」都是同一个原因：没装 cryptg。**
+
+MTProto 每个数据块都要做 AES-IGE 解密。装了 `cryptg` 走 C 实现；没有就退回 `pyaes` 的纯 Python 实现，把 asyncio 的单线程事件循环整个占满。实测同一台机器、同一代理、同样 8 并发：
+
+| 加密后端 | 吞吐 |
+| --- | --- |
+| pyaes（纯 Python，缺 cryptg） | **0.065 MB/s** |
+| cryptg（C 实现） | **7.313 MB/s** |
+
+**差了 112 倍**。而且这种慢具有欺骗性：加并发没用、换代理没用、换传输协议也没用，看起来像"网络不行"，实际是本机 CPU 在解释执行 AES。
+
+自检方式：`run` 启动的 `BOOT` 日志行末尾有 `crypto=`，遥测 JSON 里也有 `crypto` 字段。看到 `pyaes` 就立刻装：
+
+~~~bat
+python -m pip install cryptg -i https://pypi.org/simple
+~~~
+
+（国内镜像常常没同步 cryptg，所以显式指定官方源。缺 cryptg 时程序会在启动时往 stderr 打一整块警告，不静默降级。）
+
+**装好之后再看并发饱和点。** 8 条流、每条 512KB 请求是实测最优：
+
+| 配置 | 吞吐 |
+| --- | --- |
+| 1 流 × 128KB | 0.310 MB/s |
+| 2 流 × 512KB | 2.596 MB/s |
+| **8 流 × 512KB** | **6.500 ~ 7.313 MB/s** |
+| 12 流 × 512KB | 6.365 MB/s |
+| 8 流 × 1024KB | 7.023 MB/s |
+| 16 流 × 512KB | 3.950 MB/s（回落） |
+
+超过 8 条流之后两条都变差：吞吐不涨，还更容易撞 `AuthBytesInvalidError`（同 auth key 连接被服务端注销）和代理断流。
+
+**其他仍然成立的结论：**
+
+- 单连接吞吐同时受**代理出口**与 Telegram 单连接限速约束，本机带宽通常不是瓶颈（实测本机直连 Cloudflare 5.5 MB/s，而经代理走 MTProto 只有 0.09 MB/s 的时候，问题在出口不在本机）。
+- 多文件各开连接也不简单相加，总量仍受出口约束 —— **出口差的时候换节点比调参有效**；但**先确认 cryptg 装了**，不然换什么节点都是 0.06 MB/s。
 
 ---
 
@@ -447,14 +489,15 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 | `缺少 TG_API_ID / TG_API_HASH` | 没建 `.env` 或没读到 | 复制 `.env.example` 填值，或 `set TG_API_ID=...` |
 | `ModuleNotFoundError: telethon` | 依赖没装 / 用错解释器 | 激活 venv 后 `pip install -r requirements.txt` |
 | `ModuleNotFoundError: python_socks` | 走代理必需 | `pip install "python-socks[asyncio]" -i https://pypi.org/simple` |
+| 启动时 stderr 出现「【警告】加密后端是 pyaes」/ 速度只有 0.0x MB/s | **没装 cryptg**，AES-IGE 在跑纯 Python | `pip install cryptg -i https://pypi.org/simple`，重跑 `run`；看 `BOOT ... crypto=cryptg x.y.z` |
 | 一直 `TimeoutError` / 重连 | 网络不通、代理没开 | 先 `probe`；检查 `TG_PROXY` 端口 |
-| `Server closed the connection: 0 bytes read on a total of 8 expected bytes` | 代理在高流量下掐连接（常见） | 不是代码 bug；`workers` 降到 2~4 或换节点 |
+| `Server closed the connection: 0 bytes read on a total of 8 expected bytes` | 代理在高流量下掐连接（常见） | 不是代码 bug；换节点，或临时 `workers` 降到 2~4 |
 | `[WinError 64] 指定的网络名不再可用` | 本地代理入口抖动 | 同上 |
 | `AuthBytesInvalidError` | 同 auth key 并发连接太多被注销 | 降 `workers`；确认没有第二个 `run` 抢同一 session |
 | `sqlite3.OperationalError: database is locked` | 两个进程同时用同一 session | 只留一个 `run`；诊断脚本要复制 session |
 | `Could not find the input entity for PeerUser` | 用数字 id 解析公开频道失败 | 本版按 username 解析；旧索引重跑 `index` |
 | `[WinError 17] 系统无法将文件移到不同的磁盘驱动器` | `.part` 与目标不同卷 | 保持 `parts_dir_name` 在 `out_dir` 之下 |
-| 看板 0 B/s 但文件在涨 | 旧版 `chunk_kb` 太大，块未收全不计量 | 用默认 `chunk_kb=128` |
+| 看板 0 B/s 但文件在涨 | 块被半途掐断，未收全的部分不计量 | 正常现象；看 `__parts` 是否增长即可，不必改参数 |
 | 看板打不开 | `monitor.py` 没起 / 端口被占 | `set TG_PORT_MONITOR=47061` |
 | 二维码不刷新 | `login.py` 没在跑 | 两个窗口都要开；看有没有 `QR new` |
 | 扫码后一直 `NEED_2FA` | 账号开了两步验证 | 登录页右侧填两步验证密码 |
@@ -482,7 +525,7 @@ qr_server.py（显示二维码/收表单）        └──> run   ──> 目�
 
 **Q8：中文/特殊字符会出问题吗？** 会做非法字符替换与长度截断（150 字符）；极长标题可能丢尾部信息。
 
-**Q9：为什么速度颜色一直红？** 代理出口慢或被限速。换节点，别调 `workers`。
+**Q9：为什么速度颜色一直红？** 先看遥测里的 `crypto` 字段是不是 `cryptg`。不是就装 cryptg（缺它必红，加并发/换节点都没用）。已经装了还红，才是代理出口慢或被限速，换节点。
 
 **Q10：下载完会自动退出吗？** 不会。`ALL DONE` 后每 120 秒轮询新消息；要停就 Ctrl+C。
 
@@ -542,6 +585,7 @@ python tgarchiver.py run t --limit 1   :: 看到 part 增长、看板有速度�
 
 | 版本 | 日期 | 一句话变更 |
 | --- | --- | --- |
+| v1.3.0 | 2026-11-15 | 补 cryptg 硬依赖与自检：BOOT 与遥测显示加密后端；缺 cryptg 会明显警告；默认并发 4→8、chunk 128→512（实测饱和点 7.3 MB/s，比缺 cryptg 快 112 倍） |
 | v1.2.0 | 2026-11-14 | 新增 Agent Skill 形态（skill/tgarchiver：五步流程 + 环境自检） |
 | v1.1.0 | 2026-11-14 | 新增代理池：频道/机器人/手贴链接采集、测活、去重留档、一键切线路、吞吐探针 |
 | v1.0.0 | 2026-11-14 | 首个公开版：索引/筛选/分片续传/永续重连/自适应单位看板/扫码登录 |
