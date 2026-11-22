@@ -63,10 +63,12 @@ def make_qr(url, tag=""):
 
 
 def new_client():
+    px, conn = config.proxy_and_conn()
+    kw = {"connection": conn} if conn else {}
     return TelegramClient(SESS, config.API_ID, config.API_HASH,
-                          proxy=config.proxy_tuple(),
+                          proxy=px,
                           connection_retries=None, retry_delay=1, timeout=20,
-                          request_retries=8, auto_reconnect=True)
+                          request_retries=8, auto_reconnect=True, **kw)
 
 
 async def main():

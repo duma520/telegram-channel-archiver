@@ -62,21 +62,19 @@ def clone_session():
 
 
 def state_proxy():
-    """采集用的聊天线路：优先 state/proxy.json（tgproxy apply 写的），其次 .env 的 TG_PROXY。"""
-    return config.proxy_tuple()
-    if typ == "http":
-        if c.get("user"):
-            return ("http", host, port, True, c["user"], c.get("pass") or "")
-        return ("http", host, port)
-    if typ == "mtproxy":
-        return ("mtproxy", host, port, c.get("secret") or "")
-    return ("socks5", host, port)
+    """采集用的聊天线路：优先 state/proxy.json（tgproxy apply 写的），其次 .env 的 TG_PROXY。
+
+    返回 (proxy 参数, connection 类或 None)——MTProxy 必须带连接类，否则连不上。
+    """
+    return config.proxy_and_conn()
 
 
 def make_client():
     from telethon import TelegramClient
-    return TelegramClient(clone_session(), API_ID, API_HASH, proxy=state_proxy(),
-                          timeout=30, request_retries=3, connection_retries=3)
+    px, conn = state_proxy()
+    kw = {"connection": conn} if conn else {}
+    return TelegramClient(clone_session(), API_ID, API_HASH, proxy=px,
+                          timeout=30, request_retries=3, connection_retries=3, **kw)
 
 
 # ------------------------------------------------------------------ 子命令

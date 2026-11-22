@@ -61,7 +61,11 @@ python tgarchiver.py run <任务名>
 但**换线路前先看 \`crypto\`**：不是 \`cryptg x.y.z\` 就先装 cryptg，否则换什么节点都只有几十 KB/s。
 装了 cryptg 之后 8 并发 × 512KB 是实测饱和点（约 6.5~7.3 MB/s），不要盲目加到 16（会回落到 3.9）。
 
-## 4. 线路不好就换（代理池）
+## 4. 线路不好就换（代理池 / 看板面板）
+
+> 最省事的一步：`python monitor.py` 起看板后，页面下方就是代理面板 ——
+> 粘 t.me/proxy / t.me/socks 链接 → 点「添加并测活」→ 状态变「可用」后点「用这条」，
+> 下载器下一轮重连即生效（不用重启、不用改 .env）。下面是指令行等价做法。
 
 ~~~bat
 python tgproxy.py harvest --limit 120                          :: 从频道/机器人收集
