@@ -51,6 +51,11 @@ Telegram 频道批量归档器 —— 三步安装
    3) 量速：python speedprobe.py --top 3 --bytes 3
    4) 选中一条写进 state/proxy.json：python tgproxy.py apply
       下载器下一轮重连就会用上，不用改 .env、不用重启
+
+    ★更省事：开着 python monitor.py，页面下方「粘贴代理」框里一行一条贴
+      t.me/proxy / t.me/socks 链接 → 点「添加并测活」→ 状态变「可用」后点
+      「用这条」即切换，下载器下一轮重连生效。详见 README 5.7 节。
+      下载器下一轮重连就会用上，不用改 .env、不用重启
    细节见 README.md 第 5 节。注意 ee 前缀（fake-TLS）与 webproxy 这类 Telethon 连不上，
    工具会标成「客户端专用」，要验证只能在官方 Telegram 客户端里试。
 

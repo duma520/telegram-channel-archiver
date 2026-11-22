@@ -54,12 +54,13 @@ def pick_file(min_mb=3, max_mb=40):
     return idx, cand[0]
 
 
-async def measure(proxy_arg, label, nbytes):
+async def measure(proxy_arg, label, nbytes, conn=None):
     from telethon import TelegramClient
     idx, it = pick_file()
+    kw = {"connection": conn} if conn else {}
     cl = TelegramClient(clone_session(), API_ID, API_HASH, proxy=proxy_arg,
                         timeout=25, request_retries=0, connection_retries=0,
-                        auto_reconnect=False)
+                        auto_reconnect=False, **kw)
     try:
         await asyncio.wait_for(cl.connect(), 25)
         ent = await cl.get_entity(idx.get("channel_username") or idx.get("channel"))
@@ -104,13 +105,13 @@ def main():
         e = dict(scheme=r["scheme"], host=r["host"], port=r["port"], secret=r["secret"],
                  tag=r["tag"], user=r["user"], pw=r["pass"], problem=None)
         e["pass"] = r["pass"]
-        p, why = proxylinks.telethon_proxy(e)
+        p, conn, why = proxylinks.telethon_proxy(e)
         label = "%s %s:%d" % (r["scheme"], r["host"], r["port"])
         if p is None:
             print("%-34s 跳过：%s" % (label, why))
             continue
         try:
-            mbps, note = asyncio.run(asyncio.wait_for(measure(p, label, nbytes), 100))
+            mbps, note = asyncio.run(asyncio.wait_for(measure(p, label, nbytes, conn), 100))
         except asyncio.TimeoutError:
             print("%-34s 失败：整体超时 100s" % label, flush=True)
             continue

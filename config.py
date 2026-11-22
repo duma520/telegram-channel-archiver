@@ -88,24 +88,37 @@ def _proxy_from_state():
         return None
     typ = (c.get("type") or "socks5").lower()
     if typ in ("mtproxy", "mtproto"):
-        return ("mtproxy", host, port, c.get("secret") or "")
+        secret = (c.get("secret") or "").strip()
+        if not secret:
+            return None
+        from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
+        # MTProxy 必须配专用连接类；把 "mtproxy" 当协议名塞进 proxy 会被
+        # Telethon 的 _parse_proxy 直接拒绝（ValueError: Unknown proxy protocol type）
+        return ((host, port, secret), ConnectionTcpMTProxyRandomizedIntermediate)
     if typ == "http":
         if c.get("user"):
-            return ("http", host, port, True, c["user"], c.get("pass") or "")
-        return ("http", host, port)
+            return (("http", host, port, True, c["user"], c.get("pass") or ""), None)
+        return (("http", host, port), None)
     if c.get("user"):
-        return ("socks5", host, port, True, c["user"], c.get("pass") or "")
-    return ("socks5", host, port)
+        return (("socks5", host, port, True, c["user"], c.get("pass") or ""), None)
+    return (("socks5", host, port), None)
 
 
-def proxy_tuple():
-    """Telethon 的 proxy 参数：state/proxy.json > .env 的 TG_PROXY > 直连(None)。"""
+def proxy_and_conn():
+    """返回 (proxy 参数, connection 类或 None)。
+
+    MTProxy 与 socks/http 走的是两套连接栈：
+      * socks5 / http → proxy=元组，connection 留空用默认的 ConnectionTcpFull
+      * MTProxy       → connection=ConnectionTcpMTProxyRandomizedIntermediate
+                        + proxy=(host, port, secret) 三元组
+    只传 proxy 不传 connection 的旧写法会让 MTProxy 永远连不上。
+    """
     from_state = _proxy_from_state()
     if from_state is not None:
         return from_state
     url = PROXY_URL
     if not url:
-        return None
+        return None, None
     if "://" not in url:
         url = "socks5://" + url
     import urllib.parse as up
@@ -120,8 +133,13 @@ def proxy_tuple():
     host = p.hostname or "127.0.0.1"
     port = p.port or (1080 if scheme == "socks5" else 8080)
     if p.username:
-        return (scheme, host, port, True, up.unquote(p.username), up.unquote(p.password or ""))
-    return (scheme, host, port)  # 无账号密码用 3 元组，Telethon 不接受 4 元组
+        return (scheme, host, port, True, up.unquote(p.username), up.unquote(p.password or "")), None
+    return (scheme, host, port), None  # 无账号密码用 3 元组，Telethon 不接受 4 元组
+
+
+def proxy_tuple():
+    """只要 proxy 参数的老入口（不涉及 MTProxy 连接类时可以继续用）。"""
+    return proxy_and_conn()[0]
 
 
 def proxy_label():

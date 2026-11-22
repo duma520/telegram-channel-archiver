@@ -164,15 +164,33 @@ def to_link(e):
 
 
 def telethon_proxy(e):
-    """转成 Telethon 的 proxy 参数；不支持的返回 (None, 原因)。"""
+    """转成 Telethon 的连接参数。
+
+    返回 (proxy, connection, why) 三态：
+      * socks / http  → (元组, None, None)，connection 用默认的
+      * MTProxy(dd 或裸 secret) → ((host,port,secret), ConnectionTcpMTProxyRandomizedIntermediate, None)
+      * 不支持 → (None, None, 原因)
+
+    为什么 MTProxy 不能只给 proxy=
+      telethon 的 _parse_proxy 只认 socks5 / socks4 / http，传 "mtproxy" 会直接抛
+      ValueError: Unknown proxy protocol type: mtproxy。MTProxy 走的是另一套连接类，
+      必须 connection=ConnectionTcpMTProxy* 且 proxy=(host, port, secret) 三元组，
+      否则 secret 根本没机会被用上。
+    """
     if e.get("problem"):
-        return None, e["problem"]
+        return None, None, e["problem"]
     if e["scheme"] == "socks":
         if e.get("user"):
-            return ("socks5", e["host"], e["port"], True, e["user"], e.get("pass") or ""), None
-        return ("socks5", e["host"], e["port"]), None
+            return ("socks5", e["host"], e["port"], True, e["user"], e.get("pass") or ""), None, None
+        return ("socks5", e["host"], e["port"]), None, None
     if e["scheme"] == "webproxy":
-        return None, "webproxy(WebSocket) Telethon 不支持"
-    if e["tag"] == "ee":
-        return None, "fake-TLS(ee) Telethon 不支持"
-    return ("mtproxy", e["host"], e["port"], e["secret"]), None
+        return None, None, "webproxy(WebSocket) Telethon 不支持"
+    if e.get("tag") == "ee":
+        return None, None, "fake-TLS(ee) Telethon 不支持"
+    secret = (e.get("secret") or "").strip()
+    if not secret:
+        return None, None, "缺少 secret"
+    from telethon.network import ConnectionTcpMTProxyRandomizedIntermediate
+    # 只保留 16 字节 secret（dd 前缀可以留着，normalize_secret 会剥掉并校验 dd）
+    return ((e["host"], int(e["port"]), secret),
+            ConnectionTcpMTProxyRandomizedIntermediate, None)

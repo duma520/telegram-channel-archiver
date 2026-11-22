@@ -45,12 +45,13 @@ def tcp_probe(host, port, timeout=TCP_TIMEOUT):
         return False, None, "tcp %s" % (e.strerror or type(e).__name__)
 
 
-async def _mt_call(proxy_arg, timeout=MT_TIMEOUT):
+async def _mt_call(proxy_arg, conn=None, timeout=MT_TIMEOUT):
     from telethon import TelegramClient
     from telethon.tl import functions
     t0 = time.monotonic()
+    kw = {"connection": conn} if conn else {}
     cl = TelegramClient(None, API_ID, API_HASH, proxy=proxy_arg,
-                        timeout=10, connection_retries=0, request_retries=1)
+                        timeout=10, connection_retries=0, request_retries=1, **kw)
     try:
         await asyncio.wait_for(cl.connect(), timeout)
         await asyncio.wait_for(cl(functions.help.GetConfigRequest()), timeout)
@@ -72,10 +73,10 @@ async def test_entry(e, sem):
         ok, rtt, err = await asyncio.to_thread(tcp_probe, e["host"], e["port"])
         if not ok:
             return "dead", None, err
-        p, why = proxylinks.telethon_proxy(e)
+        p, conn, why = proxylinks.telethon_proxy(e)
         if p is None:
             return "unsupported", rtt, "tcp 通 · %s" % why
-        ok2, rtt2, err2 = await _mt_call(p)
+        ok2, rtt2, err2 = await _mt_call(p, conn)
         if ok2:
             return "alive", rtt2 or rtt, "ok"
         return "dead", None, err2

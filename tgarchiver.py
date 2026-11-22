@@ -93,8 +93,17 @@ def jsave(p, o):
         pass
 
 
+def proxy_and_conn():
+    """返回 (proxy 参数, connection 类或 None)。
+
+    代理优先级：state/proxy.json > .env 的 TG_PROXY > 直连。
+    MTProxy 需要专用连接类，所以这里和 proxy() 分开：只拿 proxy 参数用 proxy()。
+    """
+    return config.proxy_and_conn()
+
+
 def proxy():
-    """代理来自 .env 的 TG_PROXY，留空即直连。"""
+    """只要 proxy 参数时用它（socks5 / http / 直连都适用）。"""
     return config.proxy_tuple()
 
 
@@ -175,21 +184,59 @@ async def get_client(j, force=False):
         except Exception:
             pass
     _client = None
+    fails = 0
+    tried = []
     for attempt in range(9999):
         try:
+            px, conn = proxy_and_conn()
+            kw = {"connection": conn} if conn else {}
             c = TelegramClient(SESSION, API_ID, API_HASH, connection_retries=3, retry_delay=2,
-                               timeout=30, request_retries=3, auto_reconnect=True, proxy=proxy())
+                               timeout=30, request_retries=3, auto_reconnect=True, proxy=px, **kw)
             await asyncio.wait_for(c.connect(), timeout=25)
             if await c.is_user_authorized():
                 _client = c
+                fails = 0
                 log(j, "CONNECT ok proxy=%s" % proxy_label())
                 return c
             await c.disconnect()
         except Exception as ex:
+            fails += 1
             if attempt % 3 == 0:
                 log(j, "CONNECT retry %s proxy=%s" % (type(ex).__name__, proxy_label()))
-            await asyncio.sleep(min(20, 2 + attempt * 2))
+        # 连不上就换线路。阈值取 2 而不是 3：单次退避最长 20 秒，3 次失败会让
+        # 换线迟滞一分钟以上，日志表现成「一直 CONNECT retry 不动」。
+        if fails >= 2:
+            tried.append(_cur_key())
+            fails = 0
+            try:
+                import proxy_rotate
+                it, obj = proxy_rotate.rotate(avoid=tried)
+            except Exception:
+                it, obj = None, None
+            if it:
+                log(j, "ROTATE → %s (%s)" % (proxy_rotate.label_of(obj), it.get("status")))
+            else:
+                tried = []
+                log(j, "ROTATE 候选表里没有可用的了，继续用当前线路重试")
+        await asyncio.sleep(min(20, 2 + attempt * 2))
     return None
+
+
+def _cur_key():
+    """当前 state/proxy.json 对应的候选表 key（轮换时用来避开刚失败的那条）。"""
+    try:
+        import proxy_rotate
+        cur = proxy_rotate.current()
+        if not cur:
+            return ""
+        for it in proxy_rotate.candidates():
+            if (it["host"] == cur.get("host")
+                    and int(it["port"]) == int(cur.get("port") or 0)
+                    and (it.get("user") or "") == (cur.get("user") or "")):
+                return it["key"]
+    except Exception:
+        pass
+    return ""
 
 
 # ---------------------------------------------------------------- 命名
