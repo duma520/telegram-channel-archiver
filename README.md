@@ -624,7 +624,7 @@ xcopy /E /I skill\tgarchiver "%USERPROFILE%\.dsh\skills\tgarchiver"
 
 ## 17. 许可与致谢
 
-- 许可：MIT（见 [LICENSE](LICENSE)）。
+- 许可：AGPL-3.0（见 [LICENSE](LICENSE)）。
 - 依赖：[Telethon](https://github.com/LonamiWebs/Telethon)、[python-socks](https://github.com/romis2012/python-socks)、[qrcode](https://github.com/lincolnloop/python-qrcode)。
 - 字体：界面优先 HarmonyOS Sans / 思源黑体 / 阿里巴巴普惠体 等免费可商用字体。
 
