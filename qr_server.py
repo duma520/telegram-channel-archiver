@@ -51,7 +51,7 @@ button.ghost:hover{background:#2c3240}
 <div class="card" style="width:330px">
  <h1>手机号登录</h1>
  <p>扫码不方便就走这里。验证码会发到你已登录的 Telegram 里。</p>
- <input id="phone" placeholder="+8613800138000（含国家码）">
+ <input id="phone" placeholder="***已脱敏***-手机号（含国家码）">
  <button onclick="post('/api/phone','phone')">发送验证码</button>
  <div class="hd">验证码</div>
  <input id="code" placeholder="12345">
