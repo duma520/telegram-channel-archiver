@@ -95,7 +95,7 @@ def _proxy_from_state():
         # MTProxy 必须配专用连接类；把 "mtproxy" 当协议名塞进 proxy 会被
         # Telethon 的 _parse_proxy 直接拒绝（ValueError: Unknown proxy protocol type）
         if secret.lower().startswith("ee"):
-            # fake-TLS（v1.1.0 起）：secret 以 ee 开头表示服务端要 TLS 记录层。
+            # fake-TLS（v1.5.0 起）：secret 以 ee 开头表示服务端要 TLS 记录层。
             # Telethon 的 tcpmtproxy 不做 TLS，只能在本地起一个中转补齐握手，
             # 对 Telethon 而言上游就是 127.0.0.1:<本地端口> 的普通 MTProxy。
             import faketls
