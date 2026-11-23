@@ -77,7 +77,7 @@
 ### 2.2 装依赖
 
 ~~~bat
-cd /d G:\Python_Code\telegram-channel-archiver
+cd /d 你的项目目录\telegram-channel-archiver
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
@@ -664,7 +664,7 @@ xcopy /E /I skill\tgarchiver "%USERPROFILE%\.dsh\skills\tgarchiver"
 4. `tgarchiver.py run` 后台长跑，读 `state/<任务>_speed.json` 看速度
 5. 速度为 0 就 `tgproxy harvest/test/speedprobe/apply` 换线，再回到第 4 步
 
-环境变量 `TGARCHIVER_HOME` 可以指定工具目录，不设时自动找 `G:\Python_Code\telegram-channel-archiver`。
+环境变量 `TGARCHIVER_HOME` 可以指定工具目录，不设时自动用脚本自身所在目录。
 
 ---
 
