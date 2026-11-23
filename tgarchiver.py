@@ -141,15 +141,18 @@ def load_job(name):
     j.setdefault("max_mb", 0)
     j.setdefault("name_mode", "orig")
     j.setdefault("workers", 8)      # 实测饱和点：8 流 × 512KB 约 6.5~7.3 MB/s
-    j.setdefault("seg_mb", 2)
+    # 分片默认 1MB（v1.2.0 起；更早是 2MB）。实测 1MB 在 40MB 文件上 1.48×、
+    # 92MB 上 1.13×，且真实体积分布的波次利用率 69.4% -> 81.0%，无一条变差。
+    j.setdefault("seg_mb", 1)
     j.setdefault("chunk_kb", 512)   # 128KB 块太小，重试与计量的粒度反而不划算
     j.setdefault("ext", ".mp4")
     j.setdefault("index_file", "%s_index.json" % j["name"])
     j.setdefault("progress_file", "%s_progress.json" % j["name"])
     j.setdefault("log_file", "%s.log" % j["name"])
     j.setdefault("speed_file", "%s_speed.json" % j["name"])
+    j.setdefault("done_file", "%s_done.json" % j["name"])
     j.setdefault("parts_dir_name", "__parts")
-    for k in ("index_file", "progress_file", "log_file", "speed_file"):
+    for k in ("index_file", "progress_file", "log_file", "speed_file", "done_file"):
         if not os.path.isabs(j[k]):
             j[k] = os.path.join(SD, j[k])
     if not j.get("out_dir"):
@@ -239,6 +242,115 @@ def _cur_key():
     return ""
 
 
+# ---------------------------------------------------------------- 完成台账
+# v1.2.0 起：判「这条下过没」不再只看文件名在不在目录里。
+# 旧写法 `nm in existing -> continue` 有三个后果（实测）：
+#   1) 同名两条消息只留一份，另一份永远判「已存在」→ 永远下不到
+#   2) 文件被删/改名后无法区分「下过」和「没下过」→ 记录数远大于实际文件数，
+#      约三成文件被重复下了 2~3 次
+#   3) 网络盘抖动时 listdir 返空 → 整批重下
+# 现在改成台账 + 三重校验：台账有记录(size 一致) + 文件在 + 实际大小 == 索引 size。
+# 名字只是「去哪找这个文件」的线索，不再是判定依据。
+def load_done(j):
+    return jload(j["done_file"], {})
+
+
+def mark_done(j, donest, it, final_name, flush=True):
+    """记一条完成。flush=False 时只改内存，调用方负责最后落盘（批量回填用）。"""
+    donest[str(it["msg_id"])] = {
+        "size": int(it["size"]),
+        "name": final_name,
+        "ts": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    if flush:
+        jsave(j["done_file"], donest)
+
+
+def scan_out(out_dir):
+    """一次扫描输出目录，返回 {文件名: 大小}。失败返回 None（目录不可读）。
+
+    网络盘上逐个 os.path.getsize 是每条一次 SMB 往返，上千条就要上千次；
+    scandir 在枚举时就带回大小，一次拿全。目录抖的时候返回 None，
+    调用方退回逐个 stat（慢但不会误判成「全都没下过」）。
+    """
+    try:
+        d = {}
+        with os.scandir(out_dir) as it:
+            for e in it:
+                try:
+                    if e.is_file():
+                        d[e.name] = e.stat().st_size
+                except OSError:
+                    continue
+        return d
+    except Exception:
+        return None
+
+
+def done_ok(j, donest, it, sizes=None):
+    """三重校验，任一不满足都算「没下过」。
+
+    sizes: scan_out() 的结果，命中就直接查表，不再发 SMB 请求。
+    """
+    rec = donest.get(str(it["msg_id"]))
+    if not rec:
+        return False
+    size = int(it["size"])
+    if int(rec.get("size") or 0) != size:
+        return False          # 索引里这条的大小变了，旧记录作废
+    nm = rec.get("name")
+    if not nm:
+        return False
+    if sizes is not None:
+        return sizes.get(nm) == size
+    try:
+        return os.path.getsize(os.path.join(j["out_dir"], nm)) == size
+    except OSError:
+        return False
+
+
+def backfill_done(j, items, progst, donest):
+    """首次跑新版本时把目录里已经下好的认回来，避免全量重下。
+
+    只承认「大小完全一致」的：撞名的另一份大小对不上，一律不记，
+    留给 dl_one 用带时间戳的新名字真正下一份。
+    返回 (新增条数, 台账里已有条数)。
+    """
+    out = j["out_dir"]
+    sizes = scan_out(out)
+    if sizes is None:
+        return 0, len(donest)
+    names = progst.get("#names", {}) or {}
+    added = 0
+    for it in items:
+        key = str(it["msg_id"])
+        if donest.get(key):
+            continue
+        size = int(it["size"])
+        cands = []
+        nm = names.get(key)
+        if nm:
+            cands.append(nm)
+        try:
+            bn = build_name(j, it)
+        except Exception:
+            bn = None
+        if bn and bn not in cands:
+            cands.append(bn)
+        for c in cands:
+            if sizes.get(c) != size:
+                continue
+            mark_done(j, donest, it, c, flush=False)
+            names[key] = c      # 名字也记进 #names，后续 dl_one 才用得上同一个文件名
+            added += 1
+            break
+    if added:
+        progst["#names"] = names
+        jsave(j["progress_file"], progst)
+        jsave(j["done_file"], donest)
+    return added, len(donest) - added
+
+
 # ---------------------------------------------------------------- 命名
 def caption_of(msg):
     txt = (msg.message or "").strip()
@@ -314,7 +426,9 @@ def passes(j, it):
 async def cmd_index(name):
     j = load_job(name)
     cl = await get_client(j)
-    ent = await cl.get_entity(norm_channel(j["channel"]))
+    # 统一走 resolve_entity：用户可能把频道写成 @name / t.me/name / 纯数字 id，
+    # 纯数字那条以前会抛 ValueError: Could not find the input entity for PeerUser(...)
+    ent = await resolve_entity(cl, j, None)
     log(j, "INDEX start channel=%s id=%s" % (norm_channel(j["channel"]), ent.id))
     items, scanned, tagged, total = [], 0, 0, 0
     async for m in cl.iter_messages(ent):
@@ -417,7 +531,9 @@ async def fetch_seg(j, client, msg, off, ln, meter, tries=5):
     return None
 
 
-async def dl_one(j, ent, it, progst, meter):
+async def dl_one(j, ent, it, progst, meter, donest=None):
+    if donest is None:
+        donest = load_done(j)
     size = int(it["size"])
     key = str(it["msg_id"])
     seg = j["seg_mb"] * 1024 * 1024
@@ -431,21 +547,43 @@ async def dl_one(j, ent, it, progst, meter):
     base = build_name(j, it)
     names = progst.setdefault("#names", {})
     final_name = names.get(key)
+    if final_name:
+        # 上一次给它定过名字：大小对上就算已完成；对不上说明文件被删/被改/被同名
+        # 的另一条消息占了，清掉重新定名，不要盲目相信 #names。
+        try:
+            if os.path.getsize(os.path.join(out, final_name)) == size:
+                mark_done(j, donest, it, final_name)
+                return "exists"
+        except OSError:
+            pass
+        names.pop(key, None)
+        final_name = None
     if not final_name:
         cand = base
         if os.path.exists(os.path.join(out, cand)):
-            if os.path.getsize(os.path.join(out, cand)) == size:
-                return "exists"
+            try:
+                if os.path.getsize(os.path.join(out, cand)) == size:
+                    names[key] = cand
+                    mark_done(j, donest, it, cand)
+                    return "exists"
+            except OSError:
+                pass
+            # 同名但大小不同 → 那是另一条消息的文件，本条另起一个带时间戳的名字
             cand = unique_name(out, base, names, key)
         final_name = cand
         names[key] = final_name
     final = os.path.join(out, final_name)
     if os.path.exists(final) and os.path.getsize(final) == size:
+        mark_done(j, donest, it, final_name)
         return "exists"
     part = os.path.join(parts, "%s.part" % it["msg_id"])
     segs = int(math.ceil(size / float(seg)))
-    st = progst.get(key) or {"done": [], "size": size}
-    done = set(st["done"]) if st.get("size") == size else set()
+    # 把段大小写进指纹。progst 里的 done 存的是「第几段」，不是字节区间；
+    # 一旦 j["seg_mb"] 变了，同一批编号就落到不同区间，续下会拼出错位文件而大小仍然对得上
+    # —— 这是静默损坏，比多下一次严重得多。所以 seg_mb 与记录不符时已完成的段全部作废。
+    st = progst.get(key) or {"done": [], "size": size, "seg_mb": j["seg_mb"]}
+    same_shape = (st.get("size") == size and st.get("seg_mb") == j["seg_mb"])
+    done = set(st["done"]) if same_shape else set()
     if not os.path.exists(part) or os.path.getsize(part) != size:
         with open(part, "wb") as f:
             f.truncate(size)
@@ -454,6 +592,7 @@ async def dl_one(j, ent, it, progst, meter):
     if not todo:
         os.replace(part, final)
         progst.pop(key, None)
+        mark_done(j, donest, it, final_name)
         jsave(j["progress_file"], progst)
         return "ok"
     meter.cur = final_name[:44]
@@ -489,13 +628,14 @@ async def dl_one(j, ent, it, progst, meter):
                 f.write(b)
             async with lock:
                 done.add(i)
-                progst[key] = {"done": sorted(done), "size": size}
+                progst[key] = {"done": sorted(done), "size": size, "seg_mb": j["seg_mb"]}
                 jsave(j["progress_file"], progst)
 
     await asyncio.gather(*[worker() for _ in range(min(j["workers"], len(todo)))])
     if len(done) >= segs:
         os.replace(part, final)
         progst.pop(key, None)
+        mark_done(j, donest, it, final_name)
         jsave(j["progress_file"], progst)
         log(j, "OK %s %.1fMB" % (final_name[:44], size / 1048576.0))
         return "ok"
@@ -504,44 +644,78 @@ async def dl_one(j, ent, it, progst, meter):
     return "partial"
 
 
+async def resolve_entity(cl, j, idx=None):
+    """解析频道实体。
+
+    ★ 不要用 get_entity(idx["channel"])：索引里存的是 ent.id（正整数），
+    Telethon 对正整数一律按 PeerUser 去猜，频道在 peer 形式下是 -100… 负数，
+    加上 MemorySession 不持久化实体缓存 → 必然抛
+    ValueError: Could not find the input entity for PeerUser(...)。
+    cmd_index 一直是按用户名解析的，所以稳定；这里把「用户名优先、存下来的 id 兜底」
+    统一成一个入口，index / run 都走它。
+    """
+    cands = []
+    uname = norm_channel((idx or {}).get("channel_username") or j.get("channel") or "")
+    if uname:
+        cands.append(uname)
+    cid = (idx or {}).get("channel") or j.get("channel_id")
+    if cid:
+        try:
+            cid = int(cid)
+            if cid > 0:
+                cands.append(int("-100%d" % cid))   # 频道 peer id 形态
+            cands.append(cid)
+        except (TypeError, ValueError):
+            pass
+    last = None
+    for c in cands:
+        try:
+            return await cl.get_entity(c)
+        except Exception as ex:
+            last = ex
+    raise last if last is not None else SystemExit("无法解析频道实体：%s" % j.get("channel"))
+
+
 async def cmd_run(name, limit=0):
     j = load_job(name)
     idx = jload(j["index_file"], None)
     if not idx or not idx.get("items"):
         idx = await cmd_index(name)
-    items = idx["items"]
+    all_items = idx["items"]
     if limit:
-        items = items[:limit]
+        all_items = all_items[:limit]
     progst = jload(j["progress_file"], {})
+    donest = load_done(j)
+    # 第一次跑带台账的版本时，把目录里已经下好的认回来，避免全量重下。
+    added, had = backfill_done(j, all_items, progst, donest)
+    if added:
+        log(j, "BACKFILL 认回已下好 %d 条（台账原有 %d 条）" % (added, had))
     meter = Meter()
     asyncio.create_task(meter_task(j, meter))
     log(j, "BOOT job=%s total=%d workers=%d seg=%dMB chunk=%dKB proxy=%s crypto=%s"
-        % (j["name"], len(items), j["workers"], j["seg_mb"], j["chunk_kb"],
+        % (j["name"], len(all_items), j["workers"], j["seg_mb"], j["chunk_kb"],
            proxy_label(), CRYPTO_DESC))
     rnd = 0
+    items = all_items
     while True:
         rnd += 1
         cl = await get_client(j, force=(rnd > 1))
-        # 用 username 解析实体：索引里的数字 id 在公开频道上会被误判成 PeerUser
-        ent = await cl.get_entity(idx.get("channel_username") or norm_channel(j["channel"]))
-        try:
-            existing = set(os.listdir(j["out_dir"]))
-        except Exception:
-            existing = set()
+        # 频道实体统一走 resolve_entity：用户名优先、索引里的 id 兜底
+        ent = await resolve_entity(cl, j, idx)
+        sizes = scan_out(j["out_dir"])
         todo = []
         for it in items:
-            nm = progst.get("#names", {}).get(str(it["msg_id"])) or build_name(j, it)
-            if nm in existing:
+            if done_ok(j, donest, it, sizes):
                 continue
             todo.append(it)
         todo.sort(key=lambda x: x["size"])
         meter.total = len(todo)
         meter.done = 0
-        log(j, "ROUND %d todo=%d" % (rnd, len(todo)))
+        log(j, "ROUND %d todo=%d 台账=%d" % (rnd, len(todo), len(donest)))
         deferred = []
         for it in todo:
             try:
-                r = await dl_one(j, ent, it, progst, meter)
+                r = await dl_one(j, ent, it, progst, meter, donest)
             except Exception as ex:
                 log(j, "ERR %s %s" % (it["msg_id"], type(ex).__name__))
                 await get_client(j, force=True)
@@ -551,7 +725,7 @@ async def cmd_run(name, limit=0):
             elif r in ("partial", "err"):
                 deferred.append(it)
         if not deferred:
-            log(j, "ALL DONE job=%s" % j["name"])
+            log(j, "ALL DONE job=%s 台账=%d" % (j["name"], len(donest)))
             await asyncio.sleep(120)
             continue
         log(j, "ROUND %d end deferred=%d -> retry pass" % (rnd, len(deferred)))
@@ -565,7 +739,7 @@ def cmd_new(args):
     j = {"name": name, "channel": norm_channel(args.channel), "out_dir": args.out,
          "selector": args.selector, "keywords": [k for k in (args.keywords or "").split(",") if k],
          "min_mb": args.min_mb, "max_mb": args.max_mb, "name_mode": args.name_mode,
-         "workers": args.workers, "seg_mb": 2, "chunk_kb": 512, "ext": args.ext}
+         "workers": args.workers, "seg_mb": 1, "chunk_kb": 512, "ext": args.ext}
     p = os.path.join(JOBD, name + ".json")
     if os.path.exists(p) and not args.force:
         raise SystemExit("任务已存在: %s （加 --force 覆盖）" % p)
@@ -600,7 +774,7 @@ async def cmd_probe(ch):
     j = {"name": "probe", "channel": norm_channel(ch), "out_dir": os.getcwd(),
          "speed_file": os.path.join(SD, "probe_speed.json"), "log_file": os.path.join(SD, "probe.log"),
          "selector": "all", "keywords": [], "min_mb": 0, "max_mb": 0, "name_mode": "orig",
-         "workers": 1, "seg_mb": 2, "chunk_kb": 512, "ext": ".mp4",
+         "workers": 1, "seg_mb": 1, "chunk_kb": 512, "ext": ".mp4",
          "progress_file": os.path.join(SD, "probe_progress.json"), "index_file": os.path.join(SD, "probe_index.json")}
     cl = await get_client(j)
     ent = await cl.get_entity(norm_channel(ch))

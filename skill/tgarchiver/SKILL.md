@@ -1,6 +1,6 @@
 ---
 name: tgarchiver
-description: 批量归档 Telegram 频道里的视频/文件。当用户说「把这个 TG 频道的视频下到某目录」「批量下载频道内容」「归档 Telegram 频道」「找可用的 MTProto / SOCKS 代理给下载器用」时使用。基于本地 telegram-channel-archiver 工具（G:\Python_Code\telegram-channel-archiver）：先扫索引、再按文案/关键词/体积筛选批量下载，2MB 分片断点续传、换代理自动重连、重名加时间戳，附速度看板与代理池。下载前必查 cryptg（缺了慢 112 倍）。
+description: 批量归档 Telegram 频道里的视频/文件。当用户说「把这个 TG 频道的视频下到某目录」「批量下载频道内容」「归档 Telegram 频道」「找可用的 MTProto / SOCKS 代理给下载器用」时使用。基于本地 telegram-channel-archiver 工具（G:\Python_Code\telegram-channel-archiver）：先扫索引、再按文案/关键词/体积筛选批量下载，1MB 分片断点续传（带 seg_mb 指纹门禁防静默损坏）、换代理自动重连、重名加时间戳，附速度看板与代理池。下载前必查 cryptg（缺了慢 112 倍）。
 ---
 
 # Telegram 频道批量归档（tgarchiver）
@@ -48,7 +48,8 @@ python tgarchiver.py run <任务名>
 ~~~
 
 - 单进程死循环，Ctrl+C 停；**重跑同一条命令就是续传**（分片进度在 \`state/<任务>_progress.json\`）；
-- 同样的文件已经下过（同名同大小）会直接跳过；
+- 已下过的判据是**完成台账** `state/<任务>_done.json`（v1.5.0 起），不是「文件名在不在目录里」：台账有记录 + 大小一致 + 文件真在且大小对，三者齐才跳过。重跑会自动 `BACKFILL 认回已下好 N 条`，不会全量重下；
+- **不要中途改 `seg_mb`**：进度里的段号绑着分片大小，改了旧段全部作废重下（这是防止拼出「长度对、内容错」的静默损坏）；
 - 需要限额时加 \`--limit N\`。
 
 在 Agent 里跑请用后台任务，不要阻塞会话；进度读 \`state/<任务>_speed.json\`：
@@ -106,3 +107,18 @@ python tgarchiver.py list
 - \`state/tg_session.session\` 等于账号，**不外发、不进仓库、不打包**；
 - 只归档用户本来就有权限看到的内容；提醒遵守 Telegram 条款与当地法律；
 - 不把频道名、片名、代理账号密码写进任何公开文档或日志。
+
+## 5. 核账（判断「是不是真下完了」）
+
+要比对三处，缺一不可：
+
+~~~bat
+:: 1) 台账条目数
+python -c "import json;print(len(json.load(open('state/<任务>_done.json',encoding='utf-8'))))"
+:: 2) 盘上文件数与前缀总字节
+python -c "import os;d=r'<输出目录>';fs=[e for e in os.scandir(d) if e.is_file()];print(len(fs), sum(e.stat().st_size for e in fs))"
+~~~
+
+- 台账条目数 **不等于** 盘上文件数是正常的（可能有人工放入的文件）；
+- 以「台账里每一条都能对上盘上同名同大小的文件」为准；
+- `__parts/` 里残留 `.part` 说明还有未完成的分片，重跑 `run` 会续。
